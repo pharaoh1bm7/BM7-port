@@ -1,0 +1,10 @@
+BM7 lab topology
+
+A (priority 100) ---- routed/VPN ---- B (priority 200)
+          \                         /
+           \---- routed/VPN -------/
+                 C (priority 150)
+
+Expected preferred owner: B
+After B failure with A+C quorum: C
+After B recovery and preemption delay: B
