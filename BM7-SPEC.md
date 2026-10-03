@@ -1,129 +1,322 @@
-# BM7 Protocol Specification v0.1
+# BM7 Protocol Specification v0.2
 
 **Status:** Experimental protocol specification
+**Transport:** UDP
+**Service Name:** `bm7`
+**Requested User Port:** 4707
+
+---
 
 ## 1. Scope
 
-BM7 (Branch Mobility and Failover Protocol) is an application-layer UDP protocol for a configured group of cooperating peers that coordinate ownership of a service. A BM7 deployment can be used between branches, sites, data-center gateways, cloud gateways, or service nodes.
+BM7 (Branch Mobility and Failover Protocol) is an application-layer UDP protocol for coordinated service ownership, liveness, failure detection, deterministic election, failover, and recovery between independently administered nodes communicating over IP networks.
 
-BM7 transports coordination state; it does not itself implement routing, NAT, packet forwarding, or application-session migration. An implementation may integrate BM7 state with a local routing, firewall, proxy, or service-control mechanism.
+A primary supported deployment model is communication between nodes located on **different IP networks and administrative domains**, including publicly routed IPv4 and IPv6 networks.
 
-## 2. Terminology
+Examples include:
 
-- **Peer:** configured BM7 node.
-- **Service:** logical resource whose active owner is coordinated.
-- **Epoch:** monotonically increasing ownership generation.
-- **Sequence:** per-sender message sequence number.
-- **Lease:** time-limited claim to serve a service.
-- **Quorum:** majority of configured voting peers.
-- **Preferred:** administratively preferred owner.
-- **Active:** node currently claiming service ownership.
+* active/standby service nodes in different cloud providers;
+* geographically separated service gateways;
+* independent data-center service nodes;
+* disaster-recovery nodes located in different networks;
+* distributed service endpoints operated by separate network administrators;
+* branch or site nodes connected through ordinary routed IP connectivity.
 
-## 3. Architecture
+LANs, private routed networks, and VPN/overlay networks are also supported, but they are **not required by the protocol** and are not the defining deployment model.
 
-BM7 peers communicate directly over UDP. The path may be a LAN, routed network, IPv4/IPv6 network, or VPN/overlay. NAT traversal is not provided by BM7; deployments must provide reachable UDP endpoints.
+BM7 does not implement IP routing, NAT, packet forwarding, or application-session migration. It provides a standardized UDP control plane that allows compatible implementations to coordinate service ownership across IP-connected nodes.
 
-## 4. Transport
+---
 
-- Transport: UDP
-- Address families: IPv4 and IPv6
-- Reliability: protocol-level timers, sequence numbers, duplicate detection and retransmission where required
-- Authentication: HMAC-SHA-256 over the complete packet except the Authentication Tag field
-- Development port: administrator-selected local port; no fixed dynamic-port number is part of the protocol
+## 2. Design Objective
 
-## 5. Binary Wire Format
+The primary interoperability objective of BM7 is to allow independently implemented BM7 nodes to recognize and communicate with the same service using a stable UDP service identifier.
+
+A BM7 implementation MUST NOT require that all participating nodes belong to the same LAN, private address space, VPN, or administrative network.
+
+A conforming implementation MUST support communication using ordinary IPv4 or IPv6 UDP reachability between configured BM7 endpoints.
+
+---
+
+## 3. Terminology
+
+* **Node:** A BM7 endpoint implementing this specification.
+* **Peer:** Another BM7 node with which a node is authorized to exchange BM7 messages.
+* **Service:** A logical resource whose active ownership is coordinated.
+* **Epoch:** Monotonically increasing ownership generation.
+* **Sequence:** Per-sender message sequence number.
+* **Lease:** Time-limited claim to serve a service.
+* **Quorum:** Majority of configured voting peers.
+* **Preferred:** Administratively preferred owner.
+* **Active:** Node currently holding service ownership.
+* **Endpoint:** An IPv4 or IPv6 address and UDP port at which a BM7 node is reachable.
+
+---
+
+## 4. Network Model
+
+BM7 operates at the application layer over UDP.
+
+A BM7 deployment may contain nodes such as:
+
+```text
+          Public IP Network / Internet
+                    |
+        +-----------+-----------+
+        |                       |
+   +----+----+             +----+----+
+   | Node A  |             | Node B  |
+   | Cloud 1 |             | Cloud 2 |
+   +---------+             +---------+
+        |                       |
+        +-----------+-----------+
+                    |
+              Service State
+```
+
+Node A and Node B may be located on different networks, providers, autonomous systems, geographic regions, or administrative domains.
+
+The protocol does not assume that the peers share:
+
+* an Ethernet segment;
+* a private IP subnet;
+* a broadcast domain;
+* a VPN;
+* an overlay network;
+* a common network administrator.
+
+BM7 messages are ordinary UDP datagrams exchanged between reachable endpoints.
+
+---
+
+## 5. Endpoint Requirements
+
+A conforming BM7 deployment MUST provide a reachable UDP endpoint for every participating peer.
+
+An endpoint consists of:
+
+```text
+IP address + UDP port
+```
+
+The endpoint MAY use:
+
+* a globally routable IPv4 address;
+* a globally routable IPv6 address;
+* a DNS-resolved address;
+* an address reachable through an explicitly configured routed network.
+
+The protocol does not require NAT traversal.
+
+When a node is behind NAT or a stateful firewall, the deployment MUST provide a mechanism that permits the required UDP traffic. Such a mechanism may include port forwarding, a publicly reachable gateway, or another network-level mechanism.
+
+NAT traversal is intentionally outside the BM7 wire protocol.
+
+---
+
+## 6. Transport
+
+* Transport protocol: UDP
+* Address families: IPv4 and IPv6
+* Default requested service port: UDP/4707
+* Reliability: protocol-level timers, sequence numbers, duplicate detection, leases, and retransmission where required
+* Authentication: HMAC-SHA-256
+* Service identification: stable BM7 service name and assigned UDP port
+* Maximum protocol datagram size: implementations SHOULD remain below the IPv4 path MTU to avoid fragmentation
+
+The protocol does not depend on broadcast or multicast.
+
+Unicast communication is the normal BM7 operating mode.
+
+---
+
+## 7. Public-Network Operation
+
+Public-network communication is a normative supported use of BM7.
+
+For example, two independent organizations or cloud environments MAY operate compatible BM7 nodes:
+
+```text
+Node A
+203.0.113.10:4707
+        |
+        | UDP
+        |
+     Internet
+        |
+        | UDP
+        |
+198.51.100.20:4707
+Node B
+```
+
+The nodes use the same BM7 service identifier and wire format regardless of the network on which they are deployed.
+
+The protocol does not change its message format when communicating across the public Internet.
+
+The same protocol therefore supports:
+
+```text
+LAN
+ |
+Routed Network
+ |
+Public Internet
+ |
+IPv4 / IPv6
+ |
+Cloud / Data Center
+```
+
+without defining separate protocol variants.
+
+---
+
+## 8. Peer Configuration
+
+BM7 does not require automatic peer discovery.
+
+A peer MAY be configured using:
+
+* a literal IPv4 address;
+* a literal IPv6 address;
+* a DNS hostname;
+* an externally managed service-discovery mechanism.
+
+Once an endpoint is resolved, BM7 uses the same wire protocol for communication.
+
+A configured peer is identified logically by its Node ID rather than by its IP address.
+
+This allows an implementation to change the peer's reachable address without changing the logical identity of the peer.
+
+---
+
+## 9. Binary Wire Format
 
 All integer fields are unsigned and encoded in network byte order (big-endian).
 
-### 5.1 Common header
+### 9.1 Common Header
 
-| Field | Size |
-|---|---:|
-| Magic | 2 |
-| Version | 1 |
-| Message Type | 1 |
-| Flags | 2 |
-| Header Length | 2 |
-| Payload Length | 2 |
-| Session ID | 8 |
-| Epoch | 8 |
-| Sequence | 8 |
-| Sender ID | 16 |
-| Lease (ms) | 4 |
-| Authentication Tag | 32 |
+| Field              | Size |
+| ------------------ | ---: |
+| Magic              |    2 |
+| Version            |    1 |
+| Message Type       |    1 |
+| Flags              |    2 |
+| Header Length      |    2 |
+| Payload Length     |    2 |
+| Session ID         |    8 |
+| Epoch              |    8 |
+| Sequence           |    8 |
+| Sender ID          |   16 |
+| Lease (ms)         |    4 |
+| Authentication Tag |   32 |
 
-Header size is 86 bytes.
+Header size: 86 bytes.
 
-Magic is ASCII `B7`. Version 1 is defined by this specification.
+Magic is ASCII `B7`.
 
-### 5.2 Message types
+Version 1 is defined by this specification.
 
-| Value | Name |
-|---:|---|
-| 1 | HELLO |
-| 2 | ADVERTISE |
-| 3 | CLAIM |
-| 4 | ACK |
-| 5 | RELEASE |
-| 6 | ERROR |
+---
 
-Unknown message types are rejected.
+## 10. Message Types
 
-### 5.3 Flags
+| Value | Message   |
+| ----: | --------- |
+|     1 | HELLO     |
+|     2 | ADVERTISE |
+|     3 | CLAIM     |
+|     4 | ACK       |
+|     5 | RELEASE   |
+|     6 | ERROR     |
 
-- `0x0001` ACTIVE
-- `0x0002` STANDBY
-- `0x0004` RECOVERING
-- `0x0008` PREEMPT
-- `0x0010` QUORUM
+Unknown message types MUST be rejected.
 
-Unknown flag bits are ignored unless a future specification marks them critical.
+---
 
-## 6. Payload Format
+## 11. Flags
 
-The payload uses fixed fields for version 1.
+|    Value | Meaning    |
+| -------: | ---------- |
+| `0x0001` | ACTIVE     |
+| `0x0002` | STANDBY    |
+| `0x0004` | RECOVERING |
+| `0x0008` | PREEMPT    |
+| `0x0010` | QUORUM     |
 
-### HELLO / ADVERTISE / CLAIM / ACK / RELEASE
+Unknown non-critical flag bits MAY be ignored.
 
-| Field | Size |
-|---|---:|
-| Service ID | 16 |
-| Priority | 4 |
-| Network Cost | 4 |
-| State | 1 |
-| Reserved | 3 |
+---
+
+## 12. Payload Format
+
+HELLO, ADVERTISE, CLAIM, ACK and RELEASE use:
+
+| Field        | Size |
+| ------------ | ---: |
+| Service ID   |   16 |
+| Priority     |    4 |
+| Network Cost |    4 |
+| State        |    1 |
+| Reserved     |    3 |
+
+Payload size: 32 bytes.
 
 State values:
 
-- 0 INIT
-- 1 DISCOVERING
-- 2 STANDBY
-- 3 ACTIVE
-- 4 FAILOVER
-- 5 RECOVERY
+| Value | State       |
+| ----: | ----------- |
+|     0 | INIT        |
+|     1 | DISCOVERING |
+|     2 | STANDBY     |
+|     3 | ACTIVE      |
+|     4 | FAILOVER    |
+|     5 | RECOVERY    |
 
-Payload length is 32 bytes.
+ERROR payload is UTF-8 diagnostic text limited to 1024 bytes.
 
-ERROR payload is UTF-8 diagnostic text, limited to 1024 bytes.
+---
 
-## 7. Peer Discovery
-
-BM7 does not require broadcast discovery. A deployment may use configured unicast peers, multicast where available, or an external configuration mechanism. The protocol remains identical after peer addresses are known.
-
-## 8. Hello and Failure Detection
+## 13. Liveness
 
 Default values:
 
-- Hello interval: 2 seconds
-- Failure threshold: 3 missed intervals
-- Nominal failure detection: approximately 6 seconds
-- Lease: 10 seconds
-- Recovery hold-down: 10 seconds
-- Preemption delay: 5 seconds
+* HELLO interval: 2 seconds
+* Failure threshold: 3 missed intervals
+* Nominal failure detection: approximately 6 seconds
+* Lease: 10 seconds
+* Recovery hold-down: 10 seconds
+* Preemption delay: 5 seconds
 
-Implementations MUST make timers configurable.
+Implementations MUST make these values configurable.
 
-## 9. Election
+A BM7 implementation MUST NOT generate unlimited heartbeat traffic.
+
+---
+
+## 14. UDP Traffic and Congestion Control
+
+BM7 uses bounded periodic control traffic.
+
+The default HELLO interval is 2 seconds and implementations MUST provide configurable rate limiting.
+
+Implementations MUST:
+
+1. avoid broadcast storms;
+2. avoid uncontrolled retransmission;
+3. apply exponential backoff or equivalent bounded retry behavior when repeated messages fail;
+4. limit error responses to avoid amplification;
+5. avoid responding to unauthenticated packets with large responses;
+6. avoid generating more traffic in response to congestion than the configured rate permits.
+
+BM7 does not use UDP as an unbounded bulk-data transport.
+
+BM7 messages are small control-plane datagrams.
+
+---
+
+## 15. Election
 
 Election ordering is deterministic:
 
@@ -131,90 +324,290 @@ Election ordering is deterministic:
 2. lower network cost wins;
 3. lexicographically smaller Node ID wins.
 
-A node may claim ACTIVE only while it has quorum. A node observing a valid higher-ranked active owner does not preempt it unless the owner is considered failed and the lease has expired.
+A node MAY claim ACTIVE only while quorum exists.
 
-## 10. Failover
+A node observing a valid higher-ranked active owner MUST NOT preempt it unless the owner is considered failed and its lease has expired.
 
-When the active owner becomes unavailable, surviving peers continue HELLO exchange. After failure detection and when quorum exists, they elect an owner using the deterministic ordering and increment the epoch before issuing a CLAIM.
+---
+
+## 16. Failover
+
+When the active owner becomes unavailable:
+
+1. surviving peers continue liveness exchange;
+2. the failed owner is detected after the configured failure threshold;
+3. peers determine whether quorum exists;
+4. the winning node increments the ownership epoch;
+5. the winning node issues a CLAIM;
+6. other peers validate the CLAIM;
+7. the winning node becomes ACTIVE.
 
 A CLAIM is valid only when:
 
-- authentication succeeds;
-- epoch is not older than the receiver's current epoch;
-- sequence is fresh for the sender;
-- the sender is a configured peer;
-- the sender has quorum;
-- the claim's lease is non-zero.
+* authentication succeeds;
+* epoch is valid;
+* sequence is fresh;
+* the sender is an authorized peer;
+* the sender has quorum;
+* the lease is non-zero.
 
-## 11. Recovery
+---
 
-When a preferred node returns, it enters RECOVERY. It must wait for the hold-down and preemption delay. If it has the preferred election rank, it starts a new epoch and requests ownership. The current owner must relinquish only after accepting a higher valid epoch and observing quorum.
+## 17. Recovery
 
-## 12. Sequence Numbers and Duplicate Detection
+When a preferred node returns, it enters RECOVERY.
 
-Receivers maintain the highest accepted sequence per sender/session/epoch. Packets with a sequence number at or below the accepted value are rejected as duplicates or replay attempts.
+It MUST wait for the configured recovery hold-down and preemption delay.
 
-## 13. Split-Brain Prevention
+If it has the preferred election rank, it MAY request ownership using a new epoch.
 
-BM7 uses several independent safeguards:
+The current owner MUST NOT relinquish ownership merely because the preferred node has returned.
 
-- majority quorum;
-- monotonically increasing epochs;
-- authenticated messages;
-- per-sender sequence numbers;
-- time-limited leases;
-- deterministic tie-breaking.
+Ownership changes require a valid BM7 election and epoch transition.
 
-A deployment with two isolated groups that cannot obtain a majority MUST NOT allow either minority group to claim ownership.
+---
 
-## 14. Authentication
+## 18. Split-Brain Prevention
 
-BM7 v1 uses HMAC-SHA-256. Key distribution is outside the protocol and MUST be handled by deployment configuration or an external key-management system.
+BM7 uses:
 
-The protocol does not define a new encryption algorithm.
+* majority quorum;
+* monotonically increasing epochs;
+* authenticated messages;
+* per-sender sequence numbers;
+* time-limited leases;
+* deterministic election;
+* replay rejection.
 
-## 15. Error Handling
+A minority partition MUST NOT claim service ownership when it cannot obtain the required quorum.
 
-Malformed packets, invalid lengths, unsupported versions, invalid message types, unauthenticated packets, unknown peers, stale epochs and replayed sequences are rejected without changing service ownership state.
+---
 
-Implementations MUST NOT crash on malformed UDP datagrams.
+## 19. Authentication
 
-## 16. IPv4 / IPv6
+BM7 version 1 uses HMAC-SHA-256.
 
-The protocol has no IP-address fields in the wire header. Sender identity is a logical 128-bit Node ID, so the same packet format works over IPv4 and IPv6.
+The Authentication Tag covers the complete packet except the Authentication Tag field itself.
 
-## 17. NAT / VPN Considerations
+Implementations MUST authenticate a packet before applying any ownership state change.
 
-BM7 is suitable for routed and VPN overlays. It does not perform NAT traversal. Peers must have bidirectional UDP reachability or an overlay that supplies it. Deployments behind stateful NATs should ensure the configured Hello interval keeps the mapping alive.
+Key distribution is outside the BM7 wire protocol and MAY be handled by:
 
-## 18. Security Considerations
+* local configuration;
+* an operating-system secret store;
+* an external key-management system;
+* another authenticated provisioning mechanism.
 
-Threats include spoofing, replay, unauthorized peers, packet modification, flooding and stale ownership claims. HMAC provides message authentication and integrity but not confidentiality. Rate limiting and operational key rotation are deployment responsibilities.
+BM7 does not define a new encryption algorithm.
 
-## 19. Interoperability
+---
 
-An implementation is interoperable when it can parse, validate, authenticate, generate and act on the version-1 wire format without implementation-specific extensions. The repository contains Python and Go implementations plus cross-language test vectors.
+## 20. Replay Protection
 
-## 20. IANA Considerations
+Receivers maintain the highest accepted sequence number for each sender/session/epoch context.
 
-This experimental document does not claim an IANA-assigned port.
+Packets that are stale or duplicated MUST NOT cause ownership changes.
 
-A future request for a User Port would need to justify a stable service identifier and explain why an administrator-selected/dynamic port is not sufficient, consistent with RFC 6335. Dynamic ports (49152–65535) are not assignable and must not be treated as a permanent service identifier.
+Implementations MUST reject replayed CLAIM and RELEASE messages.
 
-Requested future service name: `bm7`
-Transport: UDP
-Reference: a stable published specification to be supplied only if the registration is pursued.
+---
 
-## 21. Interoperability and Conformance Requirements
+## 21. Versioning
 
-A conforming implementation MUST:
+The Version field identifies the BM7 wire format.
 
-- implement the common header exactly;
-- use network byte order;
-- validate lengths before parsing;
-- authenticate before applying state changes;
-- reject stale/replayed messages;
-- implement the defined election ordering;
-- enforce quorum before ACTIVE claims;
-- implement lease expiry;
-- avoid accepting malformed packets as valid control messages.
+A receiver that does not support a received version MUST reject the message without changing service ownership state.
+
+Future versions MUST preserve the ability of implementations to distinguish incompatible wire formats.
+
+Version-specific behavior MUST NOT require a new UDP service port.
+
+The BM7 service identifier therefore remains version-independent.
+
+---
+
+## 22. IPv4 and IPv6
+
+BM7 contains no IPv4- or IPv6-specific addresses in the protocol header.
+
+The Sender ID is a logical 128-bit identifier.
+
+The same wire format therefore operates over both IPv4 and IPv6.
+
+---
+
+## 23. Failure and Malformed Packet Handling
+
+Implementations MUST reject:
+
+* malformed packets;
+* invalid lengths;
+* unsupported versions;
+* unsupported message types;
+* unauthenticated packets;
+* unknown peers;
+* stale epochs;
+* replayed sequences;
+* invalid leases.
+
+Malformed UDP datagrams MUST NOT cause an implementation to crash.
+
+Invalid packets MUST NOT modify ownership state.
+
+---
+
+## 24. Interoperability
+
+An implementation is interoperable when it can:
+
+* parse the common header;
+* validate packet lengths;
+* authenticate packets;
+* process all defined message types;
+* implement the defined election algorithm;
+* enforce quorum;
+* enforce lease expiration;
+* reject replayed messages;
+* operate over IPv4;
+* operate over IPv6;
+* communicate with an implementation written independently from the reference implementation.
+
+The reference repository contains Python and Go implementations and interoperability test material.
+
+---
+
+## 25. Public Internet Interoperability Requirement
+
+Public-network interoperability is part of BM7 conformance testing.
+
+A complete interoperability test SHOULD include at least two nodes located on different IP networks.
+
+The test MUST verify:
+
+1. UDP reachability;
+2. HELLO exchange;
+3. authentication;
+4. service advertisement;
+5. ownership election;
+6. failure detection;
+7. epoch transition;
+8. failover;
+9. recovery;
+10. replay rejection.
+
+The test environment SHOULD use ordinary routed IP connectivity rather than assuming a shared LAN.
+
+---
+
+## 26. Service Identifier
+
+BM7 is intended to provide a stable service identifier for compatible implementations.
+
+A stable service identifier allows:
+
+* firewall policies to identify BM7 traffic;
+* network monitoring systems to classify BM7 traffic;
+* service discovery systems to identify BM7 endpoints;
+* independently implemented BM7 software to use the same default endpoint;
+* operators to deploy compatible implementations without assigning an arbitrary application-specific port to every deployment.
+
+The service identifier is therefore part of interoperability rather than merely an implementation convenience.
+
+---
+
+## 27. Why a Fixed User Port Is Useful
+
+BM7 is a control-plane protocol intended to operate between independently implemented nodes.
+
+Using an administrator-selected port for every deployment would make the service identifier deployment-specific.
+
+A registered UDP service port provides a stable rendezvous point for BM7 implementations and allows network infrastructure to consistently identify BM7 traffic.
+
+The requested port is one UDP service port only.
+
+BM7 does not request multiple ports for separate protocol functions.
+
+The same UDP service carries HELLO, ADVERTISE, CLAIM, ACK, RELEASE and ERROR messages.
+
+---
+
+## 28. Security Considerations
+
+Threats include:
+
+* spoofing;
+* replay;
+* unauthorized peers;
+* packet modification;
+* stale ownership claims;
+* malicious failover attempts;
+* UDP flooding;
+* malformed packet attacks.
+
+HMAC-SHA-256 provides message authentication and integrity.
+
+Rate limiting protects the UDP control plane from excessive traffic.
+
+Operators remain responsible for:
+
+* secret management;
+* firewall policy;
+* endpoint exposure;
+* key rotation;
+* monitoring;
+* denial-of-service protection.
+
+---
+
+## 29. IANA Considerations
+
+This specification requests registration of:
+
+* Service Name: `bm7`
+* Transport: UDP
+* Requested User Port: 4707
+
+The requested registration is for the BM7 application-layer service.
+
+The requested port is intended to identify the BM7 control-plane service consistently across independent implementations and deployments.
+
+BM7 is not restricted to LAN, intranet, VPN, or private-network operation.
+
+The protocol explicitly supports communication between independently administered nodes across publicly routed IPv4 and IPv6 networks.
+
+The requested port is not used as a security mechanism and does not imply trust.
+
+---
+
+## 30. Experimental Status
+
+BM7 is currently an experimental protocol with an openly published specification and reference implementations.
+
+The protocol is intentionally versioned and implementation-independent.
+
+The project does not claim that UDP/4707 is assigned until an IANA assignment is granted.
+
+Until assignment, implementations MUST NOT represent UDP/4707 as an IANA-assigned BM7 port.
+
+---
+
+## 31. Conformance Summary
+
+A conforming BM7 implementation MUST:
+
+* implement the common header;
+* use network byte order;
+* validate lengths before parsing;
+* authenticate before state changes;
+* reject stale and replayed messages;
+* implement deterministic election;
+* enforce quorum;
+* implement leases;
+* implement version handling;
+* support IPv4;
+* support IPv6;
+* support ordinary routed UDP connectivity;
+* implement rate limiting;
+* reject malformed packets safely;
+* avoid dependence on LAN, VPN, broadcast or multicast;
+* support communication between independently routed endpoints.
