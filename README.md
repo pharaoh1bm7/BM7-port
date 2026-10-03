@@ -1,56 +1,199 @@
 # BM7 — Branch Mobility and Failover Protocol
 
-BM7 is a UDP application-layer protocol for coordinated service ownership and failover between cooperating nodes such as branches, sites, data-center gateways, or service nodes.
+BM7 is an experimental UDP application-layer protocol for coordinated service ownership, failure detection, deterministic election, failover and recovery between independently administered nodes.
 
-BM7 is **not** a Python failover script. The wire protocol is defined independently in `BM7-SPEC.md`; the Python and Go implementations are reference implementations of that specification.
+## Important
 
-## Protocol goals
+BM7 is designed to operate across IP networks.
 
-- peer discovery / liveness
-- service advertisement
-- deterministic active-owner election
-- failure detection
-- controlled failover and recovery
-- split-brain mitigation using epochs, leases, sequence numbers and quorum
-- replay and duplicate rejection
-- authenticated messages with HMAC-SHA-256
-- IPv4/IPv6 transport through UDP
-- operation across LAN, routed networks and VPN/overlay paths
-- implementation-independent binary wire format
+A BM7 deployment does **not** require:
 
-## Repository status
+* the same LAN;
+* the same private subnet;
+* a VPN;
+* an overlay network;
+* broadcast;
+* multicast;
+* a shared administrative network.
 
-This repository is an **implementation and interoperability lab**, not evidence that an IANA assignment has been granted. No BM7 port is assumed to be registered.
+BM7 can operate between independently routed IPv4 and IPv6 endpoints, including nodes located in different data centers, cloud providers, geographic regions and administrative domains.
 
-During development, choose an administrator-selected local UDP port. Do not treat a Dynamic/Private port as the BM7 service identifier. RFC 6335 states that Dynamic ports (49152–65535) are not assigned and must not be used as service identifiers.
+## What BM7 Does
 
-## Quick start
+BM7 provides a standardized control plane for deciding which node owns a logical service.
 
-### Python
+The protocol provides:
 
-```bash
-python3 reference/python/bm7.py --demo
+* peer liveness;
+* service advertisement;
+* deterministic owner election;
+* failure detection;
+* controlled failover;
+* recovery;
+* leases;
+* epochs;
+* quorum;
+* sequence numbers;
+* replay protection;
+* HMAC-SHA-256 authentication;
+* IPv4 and IPv6 support;
+* implementation-independent binary wire format.
+
+BM7 does not perform IP routing, NAT traversal, packet forwarding or application-session migration.
+
+Instead, an implementation may use the BM7 ownership state to control a local service, gateway, proxy, routing policy or other service-management mechanism.
+
+## Public Network Example
+
+A BM7 deployment may look like:
+
+```text
+       Public IP Network
+              |
+      +-------+-------+
+      |               |
++-----+-----+   +-----+-----+
+| BM7 Node A|   | BM7 Node B|
+| Cloud A   |   | Cloud B   |
++-----------+   +-----------+
+      |               |
+      +-------+-------+
+              |
+       Coordinated Service
 ```
 
-### Tests
+The two nodes may be located on completely different IP networks.
 
-```bash
-python3 -m unittest discover -s tests -v
+They communicate using ordinary UDP.
+
+## Protocol
+
+The complete wire protocol is defined in:
+
+* `BM7-SPEC.md`
+
+Architecture:
+
+* `ARCHITECTURE.md`
+
+Interoperability:
+
+* `INTEROPERABILITY.md`
+
+IANA considerations:
+
+* `IANA-CONSIDERATIONS.md`
+
+Security:
+
+* `SECURITY.md`
+
+## Message Types
+
+BM7 currently defines:
+
+| Message   | Purpose                     |
+| --------- | --------------------------- |
+| HELLO     | Peer liveness               |
+| ADVERTISE | Service state advertisement |
+| CLAIM     | Ownership claim             |
+| ACK       | Acknowledgement             |
+| RELEASE   | Ownership release           |
+| ERROR     | Protocol error              |
+
+All ownership-changing messages are authenticated.
+
+## Failover Model
+
+A simplified BM7 ownership transition is:
+
+```text
+        ACTIVE
+           |
+       peer failure
+           |
+       detection
+           |
+        QUORUM?
+        /     \
+      NO       YES
+      |         |
+   STANDBY    ELECTION
+                |
+              CLAIM
+                |
+              ACTIVE
 ```
 
-### Go
+Ownership changes use epochs, leases, sequence numbers and quorum to reduce split-brain conditions.
 
-```bash
-cd reference/go
-GO111MODULE=off go test ./...
+## Transport
+
+BM7 uses UDP.
+
+The requested IANA service is:
+
+```text
+Service Name: bm7
+Transport: UDP
+Requested Port: 4707
 ```
 
-## Experimental deployment
+UDP/4707 is **not currently an assigned IANA port**.
 
-Set an administrator-selected port, for example:
+The project must not describe UDP/4707 as assigned until IANA approves the request.
 
-```bash
-export BM7_PORT=55000
+## Why a Stable Port Matters
+
+BM7 is intended to be interoperable between independently implemented software.
+
+A stable service port allows network operators and implementations to identify BM7 traffic consistently.
+
+It also provides a common default endpoint for compatible implementations instead of requiring every deployment to invent a different application-specific port.
+
+BM7 uses one service port for all protocol messages.
+
+## Security
+
+BM7 uses HMAC-SHA-256 for authentication and integrity.
+
+The protocol also provides:
+
+* sequence validation;
+* replay rejection;
+* epoch validation;
+* lease expiration;
+* quorum requirements;
+* deterministic election;
+* malformed-packet rejection.
+
+Operators remain responsible for key management and network-level filtering.
+
+## Development Status
+
+BM7 is experimental.
+
+The repository contains reference implementations and interoperability material.
+
+The protocol specification is independent of the implementation language.
+
+The project is intended to demonstrate a real interoperable application-layer UDP protocol rather than a single-host failover script.
+
+## Repository Structure
+
+```text
+BM7-port/
+├── BM7-SPEC.md
+├── ARCHITECTURE.md
+├── IANA-CONSIDERATIONS.md
+├── INTEROPERABILITY.md
+├── SECURITY.md
+├── reference/
+├── tests/
+├── lab/
+└── wireshark/
 ```
 
-The number above is only a local lab choice; it is not an assigned BM7 port.
+## License
+
+MIT
