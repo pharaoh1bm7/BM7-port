@@ -1,15 +1,38 @@
--- Minimal BM7 v1 Wireshark dissector.
-local bm7 = Proto("bm7", "BM7 Branch Mobility and Failover Protocol")
-local f_magic=ProtoField.string("bm7.magic","Magic")
-local f_version=ProtoField.uint8("bm7.version","Version",base.DEC)
-local f_type=ProtoField.uint8("bm7.type","Message Type",base.DEC)
-local f_flags=ProtoField.uint16("bm7.flags","Flags",base.HEX)
-local f_epoch=ProtoField.uint64("bm7.epoch","Epoch",base.DEC)
-local f_seq=ProtoField.uint64("bm7.sequence","Sequence",base.DEC)
-bm7.fields={f_magic,f_version,f_type,f_flags,f_epoch,f_seq}
-function bm7.dissector(buf,pinfo,tree)
- if buf:len()<86 or buf(0,2):string()~="B7" then return 0 end
- pinfo.cols.protocol="BM7"; local t=tree:add(bm7,buf(),"BM7")
- t:add(f_magic,buf(0,2)); t:add(f_version,buf(2,1)); t:add(f_type,buf(3,1)); t:add(f_flags,buf(4,2)); t:add(f_epoch,buf(18,8)); t:add(f_seq,buf(26,8)); return buf:len()
+-- BM7 Network Path State Protocol (BM7P) Wireshark Lua Dissector
+-- Author: Belal Eladawy (BM7)
+
+do
+    local bm7_proto = Proto("bm7p", "BM7 Network Path State Protocol")
+
+    local f_magic   = ProtoField.uint8("bm7p.magic", "Magic Byte", base.HEX)
+    local f_version = ProtoField.uint8("bm7p.version", "Protocol Version", base.DEC)
+    local f_command = ProtoField.uint8("bm7p.command", "Command Code", base.HEX)
+    local f_res     = ProtoField.uint8("bm7p.reserved", "Reserved", base.HEX)
+    local f_seq     = ProtoField.uint32("bm7p.seq", "Sequence Number", base.DEC)
+    local f_flags   = ProtoField.uint32("bm7p.flags", "Path Metric Flags", base.HEX)
+    local f_length  = ProtoField.uint32("bm7p.length", "Payload Length", base.DEC)
+
+    bm7_proto.fields = { f_magic, f_version, f_command, f_res, f_seq, f_flags, f_length }
+
+    function bm7_proto.dissector(buffer, pinfo, tree)
+        pinfo.cols.protocol = "BM7P"
+        
+        local length = buffer:len()
+        if length < 16 then return end
+
+        local subtree = tree:add(bm7_proto, buffer(), "BM7 Network Path State Protocol Specification")
+        
+        subtree:add(f_magic, buffer(0, 1))
+        subtree:add(f_version, buffer(1, 1))
+        subtree:add(f_command, buffer(2, 1))
+        subtree:add(f_res, buffer(3, 1))
+        subtree:add(f_seq, buffer(4, 4))
+        subtree:add(f_flags, buffer(8, 4))
+        subtree:add(f_length, buffer(12, 4))
+    end
+
+    local udp_table = DissectorTable.get("udp.port")
+    udp_table:add(7077, bm7_proto)
+    local tcp_table = DissectorTable.get("tcp.port")
+    tcp_table:add(7077, bmi_proto rescue tcp_table:add(7077, bm7_proto))
 end
-DissectorTable.get("udp.port"):add(55000,bm7)
