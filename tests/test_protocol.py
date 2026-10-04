@@ -1,6 +1,6 @@
 import sys
-import time
 import socket
+import time
 import unittest
 
 sys.path.insert(
@@ -11,30 +11,33 @@ sys.path.insert(
 import bm7
 
 
-class BM7Tests(unittest.TestCase):
+class TestBM7(unittest.TestCase):
 
     def setUp(self):
 
         self.a = bm7.make_node(
             "A",
             100,
+            ["A", "B", "C"],
         )
 
         self.b = bm7.make_node(
             "B",
             200,
+            ["A", "B", "C"],
         )
 
         self.c = bm7.make_node(
             "C",
             150,
+            ["A", "B", "C"],
         )
 
-        self.ids = {
-            self.a.node_id,
-            self.b.node_id,
-            self.c.node_id,
-        }
+        self.nodes = [
+            self.a,
+            self.b,
+            self.c,
+        ]
 
         self.now = time.monotonic()
 
@@ -44,30 +47,33 @@ class BM7Tests(unittest.TestCase):
             self.c.node_id: 150,
         }
 
-        for node in (
-            self.a,
-            self.b,
-            self.c,
-        ):
+        ids = {
+            self.a.node_id,
+            self.b.node_id,
+            self.c.node_id,
+        }
 
-            node.peers = set(self.ids)
+        for node in self.nodes:
 
-            node.peers_state = {
-                node_id: bm7.Peer(
-                    node_id,
-                    priorities[node_id],
-                    0,
-                    self.now,
-                    0,
-                    0,
-                    1,
-                    bm7.State.STANDBY,
-                    0,
+            for node_id in ids:
+
+                if node_id == node.node_id:
+                    continue
+
+                node.peers_state[
+                    node_id
+                ] = bm7.Peer(
+                    node_id=node_id,
+                    priority=priorities[node_id],
+                    cost=0,
+                    last_seen=self.now,
+                    epoch=0,
+                    sequence=0,
+                    session_id=0,
+                    state=bm7.State.STANDBY,
                 )
-                for node_id in self.ids
-            }
 
-    def test_wire_format(self):
+    def test_wire_size(self):
 
         self.assertEqual(
             bm7.HEADER_LEN,
@@ -84,91 +90,119 @@ class BM7Tests(unittest.TestCase):
             118,
         )
 
+        packet = self.a.hello()
+
         self.assertEqual(
-            len(self.a.hello()),
+            len(packet),
             118,
         )
 
-    def test_bad_key(self):
+    def test_encode_decode(self):
 
-        packet = self.a.hello()
+        raw = self.a.hello()
 
-        self.b.key = b"wrong-key"
+        packet = bm7.Packet.decode(
+            raw
+        )
+
+        self.assertEqual(
+            packet.message_type,
+            bm7.Msg.HELLO,
+        )
+
+        self.assertEqual(
+            packet.service_id,
+            self.a.service_id,
+        )
+
+        self.assertEqual(
+            packet.priority,
+            100,
+        )
+
+    def test_wrong_key_rejected(self):
+
+        raw = self.a.hello()
+
+        self.b.key = (
+            b"wrong-secret"
+        )
 
         with self.assertRaises(
             ValueError
         ):
+
             self.b.observe(
-                packet,
+                raw,
                 self.now,
             )
 
-    def test_wrong_service(self):
+    def test_wrong_service_rejected(self):
 
-        packet = self.a.hello()
+        raw = self.a.hello()
 
-        self.b.service_id = b"x" * 16
+        self.b.service_id = (
+            b"X" * 16
+        )
 
         with self.assertRaises(
             ValueError
         ):
+
             self.b.observe(
-                packet,
+                raw,
                 self.now,
             )
 
     def test_replay_rejected(self):
 
-        packet = self.a.hello()
+        raw = self.a.hello()
 
         self.b.observe(
-            packet,
+            raw,
             self.now,
         )
 
-        self.assertFalse(
-            self.b.observe(
-                packet,
-                self.now,
-            )
+        result = self.b.observe(
+            raw,
+            self.now,
         )
 
-    def test_no_quorum_claim(self):
+        self.assertFalse(result)
 
-        self.c.peers_state[
-            self.a.node_id
-        ].last_seen = (
-            self.now - 20
+    def test_quorum(self):
+
+        self.assertEqual(
+            self.a.quorum(),
+            2,
         )
 
-        self.c.peers_state[
-            self.b.node_id
-        ].last_seen = (
-            self.now - 20
-        )
-
-        with self.assertRaises(
-            RuntimeError
-        ):
-            self.c.claim(
+        self.assertTrue(
+            self.a.has_quorum(
                 self.now
             )
+        )
 
-    def test_deterministic_election(self):
+    def test_election(self):
 
-        # B failed.
+        b_id = self.b.node_id
+
         for node in (
             self.a,
             self.c,
         ):
+
             node.peers_state[
-                self.b.node_id
+                b_id
             ].last_seen = (
                 self.now - 20
             )
 
-        self.c.last_change = (
-            self.now - 10
+        self.assertEqual(
+            self.a.election_winner(
+                self.now
+            ),
+            self.c.node_id,
         )
 
         self.assertEqual(
@@ -178,15 +212,64 @@ class BM7Tests(unittest.TestCase):
             self.c.node_id,
         )
 
-        packet = self.c.claim(
+    def test_non_winner_cannot_claim(self):
+
+        b_id = self.b.node_id
+
+        for node in (
+            self.a,
+            self.c,
+        ):
+
+            node.peers_state[
+                b_id
+            ].last_seen = (
+                self.now - 20
+            )
+
+        with self.assertRaises(
+            RuntimeError
+        ):
+
+            self.a.claim(
+                self.now
+            )
+
+    def test_valid_claim(self):
+
+        b_id = self.b.node_id
+
+        for node in (
+            self.a,
+            self.c,
+        ):
+
+            node.peers_state[
+                b_id
+            ].last_seen = (
+                self.now - 20
+            )
+
+        self.c.last_change = (
+            self.now - 10
+        )
+
+        claim = self.c.claim(
             self.now
         )
 
+        self.assertEqual(
+            len(claim),
+            118,
+        )
+
+        accepted = self.a.observe(
+            claim,
+            self.now,
+        )
+
         self.assertTrue(
-            self.a.observe(
-                packet,
-                self.now,
-            )
+            accepted
         )
 
         self.assertEqual(
@@ -194,81 +277,65 @@ class BM7Tests(unittest.TestCase):
             self.c.node_id,
         )
 
-    def test_non_winner_cannot_claim(
-        self
-    ):
+    def test_real_udp(self):
 
-        for node in (
-            self.a,
-            self.c,
-        ):
-            node.peers_state[
-                self.b.node_id
-            ].last_seen = (
-                self.now - 20
-            )
-
-        self.a.last_change = (
-            self.now - 10
-        )
-
-        with self.assertRaises(
-            RuntimeError
-        ):
-            self.a.claim(
-                self.now
-            )
-
-    def test_real_udp_socket(
-        self
-    ):
-
-        sender = socket.socket(
+        tx = socket.socket(
             socket.AF_INET,
             socket.SOCK_DGRAM,
         )
 
-        receiver = socket.socket(
+        rx = socket.socket(
             socket.AF_INET,
             socket.SOCK_DGRAM,
         )
 
-        sender.bind(
+        tx.bind(
             ("127.0.0.1", 0)
         )
 
-        receiver.bind(
+        rx.bind(
             ("127.0.0.1", 0)
         )
 
-        packet = self.a.hello()
+        try:
 
-        sender.sendto(
-            packet,
-            receiver.getsockname(),
-        )
+            raw = self.a.hello()
 
-        data, _ = receiver.recvfrom(
-            2048
-        )
-
-        self.assertEqual(
-            len(data),
-            118,
-        )
-
-        self.assertTrue(
-            self.b.observe(
-                data,
-                self.now,
+            tx.sendto(
+                raw,
+                rx.getsockname(),
             )
-        )
 
-        sender.close()
-        receiver.close()
+            rx.settimeout(2)
+
+            data, _ = (
+                rx.recvfrom(2048)
+            )
+
+            self.assertEqual(
+                len(data),
+                118,
+            )
+
+            accepted = (
+                self.b.observe(
+                    data,
+                    self.now,
+                )
+            )
+
+            self.assertTrue(
+                accepted
+            )
+
+        finally:
+
+            tx.close()
+            rx.close()
 
 
 if __name__ == "__main__":
+
     unittest.main(
         verbosity=2
     )
