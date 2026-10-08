@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 """
 BM7 v1 reference implementation.
 
@@ -15,10 +16,8 @@ Features:
 - Lease validation
 - Quorum
 - Deterministic election
-- Routed-network capable transport
-
-UDP/4707 is NOT assumed to be assigned.
-Use an administrator-selected port until a default port is registered.
+- Lease-based failover
+- Preferred-return / priority preemption
 """
 
 from __future__ import annotations
@@ -35,40 +34,24 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 
 
-# =============================================================
-# Wire format
-# =============================================================
-
 MAGIC = b"B7"
 VERSION = 1
-
 AUTH_LEN = 32
 
 HEADER_FMT = "!2sBBHHHQQQ16sI32s"
 HEADER_LEN = struct.calcsize(HEADER_FMT)
 
-# 16 service ID
-# 4  priority
-# 4  cost
-# 1  state
-# 7  reserved
-#
-# Total = 32 bytes
 PAYLOAD_FMT = "!16sIIB7s"
 PAYLOAD_LEN = struct.calcsize(PAYLOAD_FMT)
 
 PACKET_LEN = HEADER_LEN + PAYLOAD_LEN
 
-
 DEFAULT_HELLO_INTERVAL = 2.0
 DEFAULT_FAILURE_THRESHOLD = 3
 DEFAULT_LEASE_SECONDS = 10.0
 DEFAULT_PREEMPTION_DELAY = 5.0
+DEFAULT_HOLD_DOWN = 10.0
 
-
-# =============================================================
-# Messages
-# =============================================================
 
 class Msg(IntEnum):
     HELLO = 1
@@ -79,10 +62,6 @@ class Msg(IntEnum):
     ERROR = 6
 
 
-# =============================================================
-# States
-# =============================================================
-
 class State(IntEnum):
     INIT = 0
     DISCOVERING = 1
@@ -91,10 +70,6 @@ class State(IntEnum):
     FAILOVER = 4
     RECOVERY = 5
 
-
-# =============================================================
-# Flags
-# =============================================================
 
 FLAG_ACTIVE = 0x0001
 FLAG_STANDBY = 0x0002
@@ -111,10 +86,6 @@ KNOWN_FLAGS = (
 )
 
 
-# =============================================================
-# Ranking
-# =============================================================
-
 @dataclass(frozen=True)
 class Rank:
     priority: int
@@ -122,19 +93,12 @@ class Rank:
     node_id: bytes
 
     def key(self):
-        # Higher priority wins.
-        # Lower cost wins.
-        # Node ID breaks ties deterministically.
         return (
             -self.priority,
             self.cost,
             self.node_id,
         )
 
-
-# =============================================================
-# Peer state
-# =============================================================
 
 @dataclass
 class Peer:
@@ -148,10 +112,6 @@ class Peer:
     state: State = State.INIT
     lease_until: float = 0.0
 
-
-# =============================================================
-# Packet
-# =============================================================
 
 @dataclass
 class Packet:
@@ -175,71 +135,57 @@ class Packet:
 
         if len(self.payload) != PAYLOAD_LEN:
             raise ValueError(
-                f"payload must be exactly "
-                f"{PAYLOAD_LEN} bytes"
+                f"payload must be exactly {PAYLOAD_LEN} bytes"
             )
 
     @property
-    def service_id(self) -> bytes:
+    def service_id(self):
         return self.payload[:16]
 
     @property
-    def priority(self) -> int:
+    def priority(self):
         return struct.unpack(
             "!I",
             self.payload[16:20],
         )[0]
 
     @property
-    def cost(self) -> int:
+    def cost(self):
         return struct.unpack(
             "!I",
             self.payload[20:24],
         )[0]
 
     @property
-    def state(self) -> State:
+    def state(self):
 
         try:
-            return State(
-                self.payload[24]
-            )
+            return State(self.payload[24])
+
         except ValueError:
             raise ValueError(
                 "invalid BM7 state"
             )
 
-    # ---------------------------------------------------------
-    # Authentication input
-    # ---------------------------------------------------------
-
-    def header_without_tag(self) -> bytes:
+    def header_without_tag(self):
 
         return struct.pack(
             HEADER_FMT,
-
             MAGIC,
             VERSION,
-
             int(self.message_type),
-
             self.flags,
-
             HEADER_LEN,
             len(self.payload),
-
             self.session_id,
             self.epoch,
             self.sequence,
-
             self.sender_id,
-
             self.lease_ms,
-
             b"\0" * AUTH_LEN,
         )
 
-    def compute_tag(self, key: bytes) -> bytes:
+    def compute_tag(self, key):
 
         return hmac.new(
             key,
@@ -248,11 +194,7 @@ class Packet:
             hashlib.sha256,
         ).digest()
 
-    # ---------------------------------------------------------
-    # Encoding
-    # ---------------------------------------------------------
-
-    def encode(self, key: bytes) -> bytes:
+    def encode(self, key):
 
         if len(self.payload) != PAYLOAD_LEN:
             raise ValueError(
@@ -263,25 +205,17 @@ class Packet:
 
         header = struct.pack(
             HEADER_FMT,
-
             MAGIC,
             VERSION,
-
             int(self.message_type),
-
             self.flags,
-
             HEADER_LEN,
             len(self.payload),
-
             self.session_id,
             self.epoch,
             self.sequence,
-
             self.sender_id,
-
             self.lease_ms,
-
             tag,
         )
 
@@ -289,27 +223,18 @@ class Packet:
 
         if len(packet) != PACKET_LEN:
             raise ValueError(
-                f"invalid BM7 packet size: "
-                f"{len(packet)}"
+                f"invalid BM7 packet size: {len(packet)}"
             )
 
         return packet
 
-    # ---------------------------------------------------------
-    # Decoding
-    # ---------------------------------------------------------
-
     @classmethod
-    def decode(
-        cls,
-        data: bytes,
-    ) -> "Packet":
+    def decode(cls, data):
 
         if len(data) != PACKET_LEN:
             raise ValueError(
-                f"invalid packet length: "
-                f"{len(data)}; expected "
-                f"{PACKET_LEN}"
+                f"invalid packet length: {len(data)}; "
+                f"expected {PACKET_LEN}"
             )
 
         (
@@ -331,34 +256,23 @@ class Packet:
         )
 
         if magic != MAGIC:
-            raise ValueError(
-                "invalid BM7 magic"
-            )
+            raise ValueError("invalid BM7 magic")
 
         if version != VERSION:
-            raise ValueError(
-                "unsupported BM7 version"
-            )
+            raise ValueError("unsupported BM7 version")
 
         if header_length != HEADER_LEN:
-            raise ValueError(
-                "invalid header length"
-            )
+            raise ValueError("invalid header length")
 
         if payload_length != PAYLOAD_LEN:
-            raise ValueError(
-                "invalid payload length"
-            )
+            raise ValueError("invalid payload length")
 
         if flags & ~KNOWN_FLAGS:
-            raise ValueError(
-                "unknown BM7 flags"
-            )
+            raise ValueError("unknown BM7 flags")
 
         try:
-            message_type = Msg(
-                message_type
-            )
+            message_type = Msg(message_type)
+
         except ValueError:
             raise ValueError(
                 "unknown BM7 message type"
@@ -376,15 +290,10 @@ class Packet:
             tag,
         )
 
-        # Validate state encoding.
         packet.state
 
         return packet
 
-
-# =============================================================
-# BM7 node
-# =============================================================
 
 @dataclass
 class BM7Node:
@@ -399,25 +308,18 @@ class BM7Node:
 
     key: bytes
 
-    hello_interval: float = (
-        DEFAULT_HELLO_INTERVAL
-    )
+    hello_interval: float = DEFAULT_HELLO_INTERVAL
 
-    failure_threshold: int = (
-        DEFAULT_FAILURE_THRESHOLD
-    )
+    failure_threshold: int = DEFAULT_FAILURE_THRESHOLD
 
-    lease_seconds: float = (
-        DEFAULT_LEASE_SECONDS
-    )
+    lease_seconds: float = DEFAULT_LEASE_SECONDS
 
-    preemption_delay: float = (
-        DEFAULT_PREEMPTION_DELAY
-    )
+    preemption_delay: float = DEFAULT_PREEMPTION_DELAY
+
+    hold_down: float = DEFAULT_HOLD_DOWN
 
     session_id: int = field(
-        default_factory=lambda:
-        secrets.randbits(64)
+        default_factory=lambda: secrets.randbits(64)
     )
 
     epoch: int = 0
@@ -425,10 +327,7 @@ class BM7Node:
 
     state: State = State.INIT
 
-    peers_state: dict[
-        bytes,
-        Peer
-    ] = field(
+    peers_state: dict[bytes, Peer] = field(
         default_factory=dict
     )
 
@@ -439,6 +338,19 @@ class BM7Node:
     last_change: float = field(
         default_factory=time.monotonic
     )
+
+    election_stable_since: float = field(
+        default_factory=time.monotonic
+    )
+
+    # ---------------------------------------------------------
+    # Preferred-return / priority-preemption timer.
+    #
+    # This is intentionally separate from
+    # election_stable_since.
+    # ---------------------------------------------------------
+
+    preemption_started_at: float | None = None
 
     def __post_init__(self):
 
@@ -458,13 +370,13 @@ class BM7Node:
             self.node_id
         )
 
-        self.peers_state[
-            self.node_id
-        ] = Peer(
+        now = time.monotonic()
+
+        self.peers_state[self.node_id] = Peer(
             node_id=self.node_id,
             priority=self.priority,
             cost=self.cost,
-            last_seen=time.monotonic(),
+            last_seen=now,
             epoch=self.epoch,
             sequence=self.sequence,
             session_id=self.session_id,
@@ -475,16 +387,13 @@ class BM7Node:
     # Quorum
     # =========================================================
 
-    def quorum(self) -> int:
+    def quorum(self):
 
         return (
             len(self.peers) // 2
         ) + 1
 
-    def live_voters(
-        self,
-        now=None,
-    ) -> set[bytes]:
+    def live_voters(self, now=None):
 
         now = (
             time.monotonic()
@@ -506,9 +415,7 @@ class BM7Node:
                 result.add(node_id)
                 continue
 
-            peer = self.peers_state.get(
-                node_id
-            )
+            peer = self.peers_state.get(node_id)
 
             if peer is None:
                 continue
@@ -522,15 +429,10 @@ class BM7Node:
 
         return result
 
-    def has_quorum(
-        self,
-        now=None,
-    ) -> bool:
+    def has_quorum(self, now=None):
 
         return (
-            len(
-                self.live_voters(now)
-            )
+            len(self.live_voters(now))
             >= self.quorum()
         )
 
@@ -538,14 +440,9 @@ class BM7Node:
     # Election
     # =========================================================
 
-    def rank(
-        self,
-        node_id: bytes,
-    ) -> Rank:
+    def rank(self, node_id):
 
-        peer = self.peers_state.get(
-            node_id
-        )
+        peer = self.peers_state.get(node_id)
 
         if peer is None:
             raise ValueError(
@@ -558,10 +455,7 @@ class BM7Node:
             node_id,
         )
 
-    def election_winner(
-        self,
-        now=None,
-    ) -> bytes | None:
+    def election_winner(self, now=None):
 
         now = (
             time.monotonic()
@@ -572,9 +466,7 @@ class BM7Node:
         if not self.has_quorum(now):
             return None
 
-        candidates = (
-            self.live_voters(now)
-        )
+        candidates = self.live_voters(now)
 
         if not candidates:
             return None
@@ -582,31 +474,21 @@ class BM7Node:
         return min(
             candidates,
             key=lambda node_id:
-            self.rank(
-                node_id
-            ).key(),
+            self.rank(node_id).key(),
         )
 
     # =========================================================
     # Payload
     # =========================================================
 
-    def build_payload(
-        self,
-        selected_state: State,
-    ) -> bytes:
+    def build_payload(self, selected_state):
 
         payload = struct.pack(
             PAYLOAD_FMT,
-
             self.service_id,
-
             self.priority,
-
             self.cost,
-
             int(selected_state),
-
             b"\0" * 7,
         )
 
@@ -618,16 +500,16 @@ class BM7Node:
         return payload
 
     # =========================================================
-    # Packet creation
+    # Packet
     # =========================================================
 
     def packet(
         self,
-        message_type: Msg,
-        state: State | None = None,
-        lease_ms: int = 0,
-        flags: int = 0,
-    ) -> bytes:
+        message_type,
+        state=None,
+        lease_ms=0,
+        flags=0,
+    ):
 
         self.sequence += 1
 
@@ -656,22 +538,70 @@ class BM7Node:
             tag=b"",
         )
 
-        return packet.encode(
-            self.key
-        )
+        return packet.encode(self.key)
 
-    def hello(self) -> bytes:
+    # =========================================================
+    # Ownership advertisement
+    # =========================================================
+
+    def hello(self):
+
+        now = time.monotonic()
+
+        lease_ms = 0
+        flags = 0
+
+        if (
+            self.state == State.ACTIVE
+            and
+            self.active_owner == self.node_id
+        ):
+
+            self.active_lease_until = (
+                now + self.lease_seconds
+            )
+
+            lease_ms = int(
+                self.lease_seconds * 1000
+            )
+
+            flags |= FLAG_ACTIVE
 
         return self.packet(
             Msg.HELLO,
             self.state,
+            lease_ms,
+            flags,
         )
 
-    def advertise(self) -> bytes:
+    def advertise(self):
+
+        now = time.monotonic()
+
+        lease_ms = 0
+        flags = 0
+
+        if (
+            self.state == State.ACTIVE
+            and
+            self.active_owner == self.node_id
+        ):
+
+            self.active_lease_until = (
+                now + self.lease_seconds
+            )
+
+            lease_ms = int(
+                self.lease_seconds * 1000
+            )
+
+            flags |= FLAG_ACTIVE
 
         return self.packet(
             Msg.ADVERTISE,
             self.state,
+            lease_ms,
+            flags,
         )
 
     # =========================================================
@@ -681,7 +611,8 @@ class BM7Node:
     def claim(
         self,
         now=None,
-    ) -> bytes:
+        preempt=False,
+    ):
 
         now = (
             time.monotonic()
@@ -695,84 +626,122 @@ class BM7Node:
                 "cannot claim without quorum"
             )
 
-        winner = (
-            self.election_winner(now)
-        )
+        winner = self.election_winner(now)
 
         if winner != self.node_id:
 
             raise RuntimeError(
-                "this node is not "
-                "the election winner"
+                "this node is not the election winner"
             )
+
+        # -----------------------------------------------------
+        # A normal failover claim MUST NOT override a valid
+        # lease held by another node.
+        #
+        # Preferred-return is the only controlled exception.
+        # -----------------------------------------------------
 
         if (
             self.active_owner
             and
-            self.active_owner
-            != self.node_id
+            self.active_owner != self.node_id
             and
-            self.active_lease_until
-            > now
+            self.active_lease_until > now
         ):
 
-            raise RuntimeError(
-                "another owner still "
-                "has a valid lease"
+            if not preempt:
+
+                raise RuntimeError(
+                    "another owner still has a valid lease"
+                )
+
+            owner_peer = self.peers_state.get(
+                self.active_owner
             )
 
-        known_epochs = [
-            self.epoch
-        ]
+            if owner_peer is None:
 
-        for peer in (
-            self.peers_state.values()
-        ):
+                raise RuntimeError(
+                    "active owner state unavailable"
+                )
+
+            local_rank = Rank(
+                self.priority,
+                self.cost,
+                self.node_id,
+            )
+
+            owner_rank = Rank(
+                owner_peer.priority,
+                owner_peer.cost,
+                self.active_owner,
+            )
+
+            # Lower key = better rank.
+            # Therefore local must be strictly better.
+            if local_rank.key() >= owner_rank.key():
+
+                raise RuntimeError(
+                    "preemption requires higher priority/rank"
+                )
+
+        # -----------------------------------------------------
+        # New epoch
+        # -----------------------------------------------------
+
+        known_epochs = [self.epoch]
+
+        for peer in self.peers_state.values():
 
             known_epochs.append(
                 peer.epoch
             )
 
-        self.epoch = (
-            max(known_epochs) + 1
-        )
+        self.epoch = max(
+            known_epochs
+        ) + 1
 
         self.state = State.ACTIVE
 
-        self.active_owner = (
-            self.node_id
-        )
+        self.active_owner = self.node_id
 
         self.active_lease_until = (
-            now
-            + self.lease_seconds
+            now + self.lease_seconds
         )
 
         self.last_change = now
 
+        self.election_stable_since = now
+
+        self.preemption_started_at = None
+
+        flags = (
+            FLAG_ACTIVE
+            | FLAG_QUORUM
+        )
+
+        if preempt:
+
+            flags |= FLAG_PREEMPT
+
         return self.packet(
             Msg.CLAIM,
-
             State.ACTIVE,
-
             int(
-                self.lease_seconds
-                * 1000
+                self.lease_seconds * 1000
             ),
-
-            FLAG_ACTIVE
-            | FLAG_QUORUM,
+            flags,
         )
 
     # =========================================================
-    # Receive / validation
+    # Receive
     # =========================================================
 
     def observe(
         self,
-        packet_data: bytes,
+        packet_data,
         now=None,
-    ) -> bool:
+    ):
 
         now = (
             time.monotonic()
@@ -784,14 +753,8 @@ class BM7Node:
             packet_data
         )
 
-        # -----------------------------------------------------
-        # Authenticate before processing state.
-        # -----------------------------------------------------
-
-        expected_tag = (
-            packet.compute_tag(
-                self.key
-            )
+        expected_tag = packet.compute_tag(
+            self.key
         )
 
         if not hmac.compare_digest(
@@ -803,37 +766,19 @@ class BM7Node:
                 "bad authentication tag"
             )
 
-        # -----------------------------------------------------
-        # Service isolation.
-        # -----------------------------------------------------
-
-        if (
-            packet.service_id
-            != self.service_id
-        ):
+        if packet.service_id != self.service_id:
 
             raise ValueError(
-                "packet belongs to "
-                "another service"
+                "packet belongs to another service"
             )
 
-        # -----------------------------------------------------
-        # Peer authorization.
-        # -----------------------------------------------------
-
-        if (
-            packet.sender_id
-            not in self.peers
-        ):
+        if packet.sender_id not in self.peers:
 
             raise ValueError(
                 "unknown peer"
             )
 
-        if (
-            packet.sender_id
-            == self.node_id
-        ):
+        if packet.sender_id == self.node_id:
 
             return False
 
@@ -847,18 +792,9 @@ class BM7Node:
                 "peer state unavailable"
             )
 
-        # -----------------------------------------------------
-        # Old epoch protection.
-        # -----------------------------------------------------
-
         if packet.epoch < self.epoch:
-            return False
 
-        # -----------------------------------------------------
-        # Replay protection.
-        #
-        # A newer session resets the sequence space.
-        # -----------------------------------------------------
+            return False
 
         if (
             packet.session_id
@@ -873,14 +809,11 @@ class BM7Node:
 
             return False
 
-        # -----------------------------------------------------
-        # CLAIM validation.
-        # -----------------------------------------------------
+        # =====================================================
+        # CLAIM validation
+        # =====================================================
 
-        if (
-            packet.message_type
-            == Msg.CLAIM
-        ):
+        if packet.message_type == Msg.CLAIM:
 
             if not (
                 packet.flags
@@ -897,33 +830,80 @@ class BM7Node:
                 return False
 
             if packet.lease_ms <= 0:
+
                 return False
 
             if packet.epoch <= self.epoch:
+
                 return False
 
             if not self.has_quorum(now):
+
                 return False
 
-            winner = (
-                self.election_winner(now)
+            winner = self.election_winner(
+                now
             )
 
-            if (
-                winner
-                != packet.sender_id
-            ):
+            if winner != packet.sender_id:
 
                 return False
 
-        # -----------------------------------------------------
-        # RELEASE validation.
-        # -----------------------------------------------------
+            # -------------------------------------------------
+            # Preferred-return preemption validation.
+            #
+            # A PREEMPT claim may override a still-valid
+            # lease ONLY when the claimant is strictly
+            # better-ranked than the current owner.
+            # -------------------------------------------------
 
-        if (
-            packet.message_type
-            == Msg.RELEASE
-        ):
+            if packet.flags & FLAG_PREEMPT:
+
+                if (
+                    self.active_owner
+                    and
+                    self.active_owner
+                    != packet.sender_id
+                    and
+                    self.active_lease_until
+                    > now
+                ):
+
+                    owner_peer = (
+                        self.peers_state.get(
+                            self.active_owner
+                        )
+                    )
+
+                    if owner_peer is None:
+
+                        return False
+
+                    claimant_rank = Rank(
+                        packet.priority,
+                        packet.cost,
+                        packet.sender_id,
+                    )
+
+                    owner_rank = Rank(
+                        owner_peer.priority,
+                        owner_peer.cost,
+                        self.active_owner,
+                    )
+
+                    if (
+                        claimant_rank.key()
+                        >=
+                        owner_rank.key()
+                    ):
+
+                        return False
+
+        # =====================================================
+        # RELEASE validation
+        # =====================================================
+
+        if packet.message_type == Msg.RELEASE:
 
             if (
                 self.active_owner
@@ -932,36 +912,23 @@ class BM7Node:
 
                 return False
 
-        # -----------------------------------------------------
-        # Commit peer information only
-        # after validation.
-        # -----------------------------------------------------
+        # =====================================================
+        # Commit peer information
+        # =====================================================
 
-        peer.priority = (
-            packet.priority
-        )
+        peer.priority = packet.priority
 
-        peer.cost = (
-            packet.cost
-        )
+        peer.cost = packet.cost
 
         peer.last_seen = now
 
-        peer.epoch = (
-            packet.epoch
-        )
+        peer.epoch = packet.epoch
 
-        peer.sequence = (
-            packet.sequence
-        )
+        peer.sequence = packet.sequence
 
-        peer.session_id = (
-            packet.session_id
-        )
+        peer.session_id = packet.session_id
 
-        peer.state = (
-            packet.state
-        )
+        peer.state = packet.state
 
         if packet.lease_ms:
 
@@ -971,37 +938,146 @@ class BM7Node:
                 / 1000.0
             )
 
-        # -----------------------------------------------------
-        # HELLO / ADVERTISE / ACK
-        # do not change ownership.
-        # -----------------------------------------------------
+        # =====================================================
+        # ACTIVE HELLO / ADVERTISE
+        # =====================================================
 
         if packet.message_type in (
             Msg.HELLO,
             Msg.ADVERTISE,
-            Msg.ACK,
         ):
+
+            active_announcement = (
+                packet.state
+                == State.ACTIVE
+                and
+                bool(
+                    packet.flags
+                    & FLAG_ACTIVE
+                )
+                and
+                packet.lease_ms > 0
+            )
+
+            # -------------------------------------------------
+            # Newer epoch
+            # -------------------------------------------------
 
             if packet.epoch > self.epoch:
 
-                self.epoch = (
-                    packet.epoch
-                )
+                self.epoch = packet.epoch
+
+                if active_announcement:
+
+                    self.active_owner = (
+                        packet.sender_id
+                    )
+
+                    self.active_lease_until = (
+                        peer.lease_until
+                    )
+
+                    self.state = (
+                        State.STANDBY
+                    )
+
+                    self.last_change = now
+
+                    self.election_stable_since = (
+                        now
+                    )
+
+                    self.preemption_started_at = (
+                        None
+                    )
+
+            # -------------------------------------------------
+            # Same epoch
+            # -------------------------------------------------
+
+            elif packet.epoch == self.epoch:
+
+                if active_announcement:
+
+                    if self.active_owner is None:
+
+                        self.active_owner = (
+                            packet.sender_id
+                        )
+
+                        self.active_lease_until = (
+                            peer.lease_until
+                        )
+
+                        self.state = (
+                            State.STANDBY
+                        )
+
+                        self.last_change = now
+
+                        self.election_stable_since = (
+                            now
+                        )
+
+                        self.preemption_started_at = (
+                            None
+                        )
+
+                    elif (
+                        self.active_owner
+                        == packet.sender_id
+                    ):
+
+                        # -------------------------------------------------
+                        # IMPORTANT:
+                        #
+                        # Do NOT reset election_stable_since here.
+                        #
+                        # A normal heartbeat from the same owner does
+                        # not create a new election view.
+                        # -------------------------------------------------
+
+                        self.active_lease_until = (
+                            peer.lease_until
+                        )
+
+                        if self.state == State.ACTIVE:
+
+                            if (
+                                self.active_owner
+                                != self.node_id
+                            ):
+
+                                self.state = (
+                                    State.STANDBY
+                                )
+
+                    else:
+
+                        # Two different owners claim the same epoch.
+                        return True
 
             return True
 
-        # -----------------------------------------------------
-        # Valid CLAIM.
-        # -----------------------------------------------------
+        # =====================================================
+        # ACK
+        # =====================================================
 
-        if (
-            packet.message_type
-            == Msg.CLAIM
-        ):
+        if packet.message_type == Msg.ACK:
 
-            self.epoch = (
-                packet.epoch
-            )
+            if packet.epoch > self.epoch:
+
+                self.epoch = packet.epoch
+
+            return True
+
+        # =====================================================
+        # CLAIM commit
+        # =====================================================
+
+        if packet.message_type == Msg.CLAIM:
+
+            self.epoch = packet.epoch
 
             self.active_owner = (
                 packet.sender_id
@@ -1011,47 +1087,52 @@ class BM7Node:
                 peer.lease_until
             )
 
-            self.state = (
-                State.STANDBY
-            )
+            self.state = State.STANDBY
 
             self.last_change = now
+
+            self.election_stable_since = now
+
+            self.preemption_started_at = None
 
             return True
 
-        # -----------------------------------------------------
-        # Valid RELEASE.
-        # -----------------------------------------------------
+        # =====================================================
+        # RELEASE
+        # =====================================================
 
-        if (
-            packet.message_type
-            == Msg.RELEASE
-        ):
+        if packet.message_type == Msg.RELEASE:
 
-            self.active_owner = None
+            if (
+                self.active_owner
+                == packet.sender_id
+            ):
 
-            self.active_lease_until = (
-                0.0
-            )
+                self.active_owner = None
 
-            self.state = (
-                State.FAILOVER
-            )
+                self.active_lease_until = 0.0
 
-            self.last_change = now
+                self.state = State.FAILOVER
+
+                self.last_change = now
+
+                self.election_stable_since = (
+                    now
+                )
+
+                self.preemption_started_at = (
+                    None
+                )
 
             return True
 
         return True
 
     # =========================================================
-    # Failover decision
+    # Failover / Preferred Return
     # =========================================================
 
-    def should_claim(
-        self,
-        now=None,
-    ) -> bool:
+    def should_claim(self, now=None):
 
         now = (
             time.monotonic()
@@ -1059,61 +1140,214 @@ class BM7Node:
             else now
         )
 
+        # =====================================================
+        # Existing remote owner
+        # =====================================================
+
+        if (
+            self.active_owner
+            and
+            self.active_owner
+            != self.node_id
+        ):
+
+            owner_id = self.active_owner
+
+            # -------------------------------------------------
+            # Remote owner still has a valid lease.
+            # -------------------------------------------------
+
+            if self.active_lease_until > now:
+
+                owner_peer = (
+                    self.peers_state.get(
+                        owner_id
+                    )
+                )
+
+                if owner_peer is not None:
+
+                    local_rank = Rank(
+                        self.priority,
+                        self.cost,
+                        self.node_id,
+                    )
+
+                    owner_rank = Rank(
+                        owner_peer.priority,
+                        owner_peer.cost,
+                        owner_id,
+                    )
+
+                    # -------------------------------------------------
+                    # Preferred return:
+                    #
+                    # Local node must be strictly better-ranked.
+                    # -------------------------------------------------
+
+                    if (
+                        local_rank.key()
+                        <
+                        owner_rank.key()
+                    ):
+
+                        # Quorum is mandatory.
+                        if not self.has_quorum(
+                            now
+                        ):
+
+                            self.preemption_started_at = (
+                                None
+                            )
+
+                            return False
+
+                        # Local node must be the deterministic
+                        # election winner.
+                        winner = (
+                            self.election_winner(
+                                now
+                            )
+                        )
+
+                        if winner != self.node_id:
+
+                            self.preemption_started_at = (
+                                None
+                            )
+
+                            return False
+
+                        # Start the independent preemption timer.
+                        if (
+                            self.preemption_started_at
+                            is None
+                        ):
+
+                            self.preemption_started_at = (
+                                now
+                            )
+
+                            return False
+
+                        # Wait until the configured preferred-return
+                        # delay has elapsed.
+                        if (
+                            now
+                            - self.preemption_started_at
+                            <
+                            self.preemption_delay
+                        ):
+
+                            return False
+
+                        # Controlled preemption is now permitted.
+                        return True
+
+                # Current owner exists and is not lower-ranked.
+                self.preemption_started_at = None
+
+                return False
+
+            # -------------------------------------------------
+            # Remote owner lease expired.
+            # Existing failover behavior.
+            # -------------------------------------------------
+
+            self.active_owner = None
+
+            self.active_lease_until = 0.0
+
+            self.state = State.FAILOVER
+
+            self.last_change = now
+
+            self.election_stable_since = now
+
+            self.preemption_started_at = None
+
+        # =====================================================
+        # Our own lease expired
+        # =====================================================
+
+        if (
+            self.state == State.ACTIVE
+            and
+            self.active_owner
+            == self.node_id
+        ):
+
+            if (
+                self.active_lease_until
+                > now
+            ):
+
+                return False
+
+            self.active_owner = None
+
+            self.active_lease_until = 0.0
+
+            self.state = State.FAILOVER
+
+            self.last_change = now
+
+            self.election_stable_since = now
+
+            self.preemption_started_at = None
+
+        # =====================================================
+        # Quorum required
+        # =====================================================
+
         if not self.has_quorum(now):
+
             return False
 
+        # =====================================================
+        # Deterministic election
+        # =====================================================
+
+        winner = self.election_winner(now)
+
+        if winner != self.node_id:
+
+            self.preemption_started_at = None
+
+            return False
+
+        # =====================================================
+        # Normal failover stability delay
+        #
+        # This remains separate from preferred-return timer.
+        # =====================================================
+
         if (
-            self.election_winner(now)
-            != self.node_id
+            now
+            - self.election_stable_since
+            <
+            self.preemption_delay
         ):
 
             return False
 
-        if (
-            self.active_owner
-            and
-            self.active_owner
-            != self.node_id
-            and
-            self.active_lease_until
-            > now
-        ):
+        self.preemption_started_at = None
 
-            return False
-
-        # Do not re-claim while already ACTIVE.
-        if self.active_owner == self.node_id:
-            return False
-
-        # After losing the current owner, wait for the
-        # preemption delay before starting a new claim.
-        if self.active_owner is None:
-            return (
-                now - self.last_change
-                >= self.preemption_delay
-            )
-
-        return (
-            now - self.last_change
-            >= self.preemption_delay
-        )
+        return True
 
 
 # =============================================================
-# UDP transport
+# UDP Transport
 # =============================================================
 
 class BM7UDPTransport:
 
     def __init__(
         self,
-        node: BM7Node,
-        bind_host: str,
-        port: int,
-        endpoints: dict[
-            bytes,
-            tuple,
-        ],
+        node,
+        bind_host,
+        port,
+        endpoints,
     ):
 
         self.node = node
@@ -1134,6 +1368,7 @@ class BM7UDPTransport:
             )
 
         except OSError:
+
             pass
 
         self.sock.setsockopt(
@@ -1147,16 +1382,12 @@ class BM7UDPTransport:
         )
 
         self.last_hello = 0.0
+
         self.last_advertise = 0.0
 
-    def send(
-        self,
-        data: bytes,
-    ):
+    def send(self, data):
 
-        for peer_id in (
-            self.node.peers
-        ):
+        for peer_id in self.node.peers:
 
             if (
                 peer_id
@@ -1165,13 +1396,12 @@ class BM7UDPTransport:
 
                 continue
 
-            endpoint = (
-                self.endpoints.get(
-                    peer_id
-                )
+            endpoint = self.endpoints.get(
+                peer_id
             )
 
             if endpoint is None:
+
                 continue
 
             try:
@@ -1190,9 +1420,7 @@ class BM7UDPTransport:
 
     def receive(self):
 
-        self.sock.settimeout(
-            0.2
-        )
+        self.sock.settimeout(0.2)
 
         try:
 
@@ -1208,16 +1436,14 @@ class BM7UDPTransport:
 
         try:
 
-            accepted = (
-                self.node.observe(
-                    data
-                )
+            accepted = self.node.observe(
+                data
             )
 
             if accepted:
 
-                packet = (
-                    Packet.decode(data)
+                packet = Packet.decode(
+                    data
                 )
 
                 print(
@@ -1250,6 +1476,10 @@ class BM7UDPTransport:
 
             now = time.monotonic()
 
+            # -------------------------------------------------
+            # HELLO
+            # -------------------------------------------------
+
             if (
                 now
                 - self.last_hello
@@ -1262,10 +1492,14 @@ class BM7UDPTransport:
 
                 self.last_hello = now
 
+            # -------------------------------------------------
+            # ADVERTISE
+            # -------------------------------------------------
+
             if (
                 now
                 - self.last_advertise
-                >= 10.0
+                >= 2.0
             ):
 
                 self.send(
@@ -1274,30 +1508,58 @@ class BM7UDPTransport:
 
                 self.last_advertise = now
 
-            if (
-                self.node.should_claim(
-                    now
-                )
+            # -------------------------------------------------
+            # Election / failover / preferred return
+            # -------------------------------------------------
+
+            if self.node.should_claim(
+                now
             ):
 
                 try:
 
-                    claim = (
-                        self.node.claim(
-                            now
-                        )
+                    # A live remote owner means this is
+                    # preferred-return preemption.
+                    preempt = (
+                        self.node.active_owner
+                        is not None
+                        and
+                        self.node.active_owner
+                        != self.node.node_id
+                        and
+                        self.node.active_lease_until
+                        > now
+                    )
+
+                    claim = self.node.claim(
+                        now,
+                        preempt=preempt,
                     )
 
                     self.send(
                         claim
                     )
 
-                    print(
-                        "[STATE] "
-                        "local node became ACTIVE"
-                    )
+                    if preempt:
+
+                        print(
+                            "[STATE] "
+                            "local node PREEMPTED "
+                            f"owner epoch="
+                            f"{self.node.epoch}"
+                        )
+
+                    else:
+
+                        print(
+                            "[STATE] "
+                            "local node became ACTIVE "
+                            f"epoch="
+                            f"{self.node.epoch}"
+                        )
 
                 except RuntimeError:
+
                     pass
 
             self.receive()
@@ -1308,10 +1570,10 @@ class BM7UDPTransport:
 # =============================================================
 
 def make_node(
-    name: str,
-    priority: int,
-    all_nodes: list[str],
-) -> BM7Node:
+    name,
+    priority,
+    all_nodes,
+):
 
     node_id = hashlib.sha256(
         name.encode()
@@ -1321,7 +1583,6 @@ def make_node(
         hashlib.sha256(
             other.encode()
         ).digest()[:16]
-
         for other in all_nodes
     }
 
@@ -1344,6 +1605,8 @@ def make_node(
         "C": 150,
     }
 
+    now = time.monotonic()
+
     for other in all_nodes:
 
         other_id = hashlib.sha256(
@@ -1356,7 +1619,7 @@ def make_node(
             node_id=other_id,
             priority=priorities[other],
             cost=0,
-            last_seen=time.monotonic(),
+            last_seen=now,
             epoch=0,
             sequence=0,
             session_id=0,
@@ -1396,7 +1659,10 @@ def demo():
         b"B"
     ).digest()[:16]
 
-    # B fails.
+    # ---------------------------------------------------------
+    # Simulate B failure.
+    # ---------------------------------------------------------
+
     for node in (a, c):
 
         node.peers_state[
@@ -1405,7 +1671,7 @@ def demo():
             now - 20
         )
 
-    # A and C are alive.
+    # A and C can still see each other.
     for node in (a, c):
 
         for other in (a, c):
@@ -1424,18 +1690,31 @@ def demo():
         now - 10
     )
 
-    # C has priority 150.
-    # A has priority 100.
+    a.election_stable_since = (
+        now - 10
+    )
+
+    c.election_stable_since = (
+        now - 10
+    )
+
     assert (
         c.election_winner(now)
         == c.node_id
     )
 
-    assert c.should_claim(now)
+    assert c.should_claim(
+        now
+    )
 
-    claim = c.claim(now)
+    claim = c.claim(
+        now
+    )
 
-    assert len(claim) == PACKET_LEN
+    assert (
+        len(claim)
+        == PACKET_LEN
+    )
 
     assert a.observe(
         claim,
@@ -1447,10 +1726,101 @@ def demo():
         == c.node_id
     )
 
-    # Replay MUST fail.
+    # ---------------------------------------------------------
+    # Replay must be rejected.
+    # ---------------------------------------------------------
+
     assert not a.observe(
         claim,
         now,
+    )
+
+    # ---------------------------------------------------------
+    # Preferred return / preemption test.
+    #
+    # C is currently ACTIVE.
+    # B has higher priority.
+    # B has quorum and is the deterministic winner.
+    # The preemption timer has already elapsed.
+    # ---------------------------------------------------------
+
+    b.peers_state[
+        c.node_id
+    ].last_seen = now
+
+    b.peers_state[
+        a.node_id
+    ].last_seen = now
+
+    b.peers_state[
+        c.node_id
+    ].epoch = c.epoch
+
+    b.peers_state[
+        c.node_id
+    ].sequence = 1
+
+    b.peers_state[
+        c.node_id
+    ].state = State.ACTIVE
+
+    b.active_owner = c.node_id
+
+    b.active_lease_until = (
+        now + b.lease_seconds
+    )
+
+    b.state = State.STANDBY
+
+    b.preemption_started_at = (
+        now - b.preemption_delay
+    )
+
+    assert b.election_winner(
+        now
+    ) == b.node_id
+
+    assert b.should_claim(
+        now
+    )
+
+    preempt_claim = b.claim(
+        now,
+        preempt=True,
+    )
+
+    preempt_packet = Packet.decode(
+        preempt_claim
+    )
+
+    assert (
+        preempt_packet.flags
+        & FLAG_PREEMPT
+    )
+
+    assert (
+        preempt_packet.flags
+        & FLAG_ACTIVE
+    )
+
+    assert (
+        preempt_packet.flags
+        & FLAG_QUORUM
+    )
+
+    assert c.observe(
+        preempt_claim,
+        now,
+    )
+
+    assert (
+        c.active_owner
+        == b.node_id
+    )
+
+    assert (
+        c.state
+        == State.STANDBY
     )
 
     print(
@@ -1493,6 +1863,18 @@ def demo():
         "replay-protection=OK"
     )
 
+    print(
+        "active-lease-advertisement=OK"
+    )
+
+    print(
+        "stable-election=OK"
+    )
+
+    print(
+        "preferred-return-preemption=OK"
+    )
+
 
 # =============================================================
 # Main
@@ -1510,11 +1892,14 @@ def main():
     args = parser.parse_args()
 
     if args.demo:
+
         demo()
+
         return
 
     parser.print_help()
 
 
 if __name__ == "__main__":
+
     main()
