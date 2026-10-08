@@ -1,6 +1,6 @@
 # BM7 — Branch Mobility and Failover Protocol
 
-BM7 is an experimental UDP application-layer protocol for coordinated service ownership, failure detection, deterministic election, failover and recovery between independently administered nodes.
+BM7 is a stable (v1) UDP application-layer protocol for coordinated service ownership, failure detection, deterministic election, failover and recovery between independently administered nodes.
 
 ## Important
 
@@ -171,7 +171,7 @@ Operators remain responsible for key management and network-level filtering.
 
 ## Development Status
 
-BM7 is experimental.
+BM7 v1 is declared stable by its author. The wire format and protocol rules in `BM7-SPEC.md` are frozen for version 1; incompatible changes require a new Version value.
 
 The repository contains reference implementations and interoperability material.
 
@@ -179,8 +179,9 @@ The repository contains reference implementations and interoperability material.
 | ---- | ------ |
 | Wire format (Python and Go, shared test vectors) | Tested, `tests/interop/run.sh` |
 | Node logic (election, quorum, leases) | Python only, unit-tested on loopback |
-| Public-network / IPv6 / multi-host test | Not yet performed |
-| Independent second implementation | Not yet available |
+| Public-network / multi-host test | Performed by the maintainer; raw logs and packet capture to be added under `evidence/` |
+| IPv6 | Not documented yet |
+| Independent second implementation | Not yet available (Python and Go implementations are by the same author) |
 
 See `INTEROPERABILITY.md` ("Registration Readiness") for what is required before a port request is resubmitted.
 
