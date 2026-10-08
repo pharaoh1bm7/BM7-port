@@ -1081,8 +1081,17 @@ class BM7Node:
 
             return False
 
+        # Do not re-claim while already ACTIVE.
+        if self.active_owner == self.node_id:
+            return False
+
+        # After losing the current owner, wait for the
+        # preemption delay before starting a new claim.
         if self.active_owner is None:
-            return True
+            return (
+                now - self.last_change
+                >= self.preemption_delay
+            )
 
         return (
             now - self.last_change
